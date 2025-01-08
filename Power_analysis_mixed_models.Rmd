@@ -1,0 +1,266 @@
+---
+title: "Power Analysis of mixed models"
+author: "Martial Foegel"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# ipak function: install and load multiple R packages.
+# check to see if packages are installed. Install them if they are not, then load them into the R session.
+
+ipak <- function(pkg){
+    new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+    if (length(new.pkg)) 
+        install.packages(new.pkg, dependencies = TRUE)
+    sapply(pkg, require, character.only = TRUE)
+}
+
+# usage
+packages <- c("rmarkdown", "ggplot2", "scales", "tinytex", "lmerTest")
+ipak(packages)
+
+#for replication purposes
+set.seed(26122023)
+```
+
+# Power analysis for mixed models
+
+Let's imagine an experiment where your presenting a particular type of word in different context, before presenting the participant with a judgement task on which you measure their response time. Then the elements we will work with here are the number of participants, the number of items (the context of presentation of the target word) and the type of word (e.g. verbs, nouns, adjectives and adverbs). For the power analysis We will vary the number of participants and items, while the number of type will be fixed to 4.
+
+## Step by step with everything fixed
+
+Let us first generate our design matrix :
+
+```{r}
+generate_design_matrix <- function(n_participants, n_items){
+  dt <- expand.grid(type = c("Verb", "Noun", "Adj", "Adv"),
+                    participant = 1:n_participants,
+                    item = 1:n_items  #number of item for each type of word
+                    )
+  return(dt)
+}
+
+(tmp_dt <- generate_design_matrix(n_participants = 30, n_items = 20))
+```
+
+Now for this analysis, we will put a random intercept on participants and items, so the model will look something like this :
+$$y_{jkl} =\mu +t_j + p_k +i_l + \epsilon_{jkl}\\
+p_k \sim N(0, \sigma_p^2),\quad i_l \sim N(0, \sigma_i^2),\quad \epsilon_{jkl} \sim N(0, \sigma_\epsilon^2), \text{ mutually independant,} $$
+with $y$ the response time for type $j$, participant $k$ and item $l$, $t$ the fixed effect for each type $j$ corresponding to the four values for the type of word ("Verb", "Noun", "Adj", "Adv"), $p_k$ the random intercept for the $k$-th participant, $i_l$ the random intercept for the $l$-th item and $ \epsilon_{jkl}$ the random residual error term.
+
+Now let's set all the values for fixed and random effect up:
+
+```{r}
+mu <- 800 #average RT
+t_j <- c("Verb" = -20, "Noun" = 30,
+         "Adj" = 10, "Adv" = -10) #effect of types of word
+sd_p <- 100 #random intercept sd for subject
+sd_i <- 80 #random intercept sd for item
+sd_epsilon <- 200 #random residual error sd
+```
+
+Now we just need to create the random samples for item and participant.
+
+```{r}
+p_k <- rnorm(unique(tmp_dt$participant), sd = sd_p)
+i_l <- rnorm(unique(tmp_dt$item), sd = sd_i)
+```
+
+Now to generate the response type we can go through our design matrix and calculate the value for each line with the following :
+
+```{r}
+y <- nrow(tmp_dt)
+
+for(i in 1:nrow(tmp_dt)){
+  y[i] <- mu + 
+    t_j[tmp_dt$type[i]] + 
+    p_k[tmp_dt$participant[i]] + 
+    i_l[tmp_dt$item[i]] +
+    rnorm(1, sd = sd_epsilon)
+}
+
+head(cbind(tmp_dt, RT = y))
+```
+
+Put all of this in a function
+
+```{r}
+add_y_data <- function(dataframe){
+  mu <- 800 #average RT
+  t_j <- c("Verb" = -20, "Noun" = 30,
+         "Adj" = 10, "Adv" = -10) #effect of types of word
+  sd_p <- 100 #random intercept sd for subject
+  sd_i <- 80 #random intercept sd for item
+  sd_epsilon <- 200 #random residual error sd
+  
+  p_k <- rnorm(unique(dataframe$participant), sd = sd_p)
+  i_l <- rnorm(unique(dataframe$item), sd = sd_i)
+  
+  y <- nrow(dataframe)
+
+  for(i in 1:nrow(dataframe)){
+    y[i] <- mu + 
+      t_j[dataframe$type[i]] + 
+      p_k[dataframe$participant[i]] + 
+      i_l[dataframe$item[i]] +
+      rnorm(1, sd = sd_epsilon)
+  }
+
+  dataframe <- cbind(dataframe, RT = y)
+  return(dataframe)
+}
+
+(tmp_dt_2 <- add_y_data(tmp_dt))
+```
+
+
+Now we can fit our model onto our simulated data :
+
+```{r}
+anova(lmer(RT ~ type + (1|participant) + (1|item), tmp_dt_2), corr = F)
+```
+Be mindful, getting the degrees of freedoms (and by extension p-values) in a mixed model is not a trivial matter. Here we are using package *lmerTest* which use the Welch–Satterthwaite approximation to get the degrees of freedom.
+
+Let us now store the p-value, as well as the information on the singularity/convergence of the model.
+
+```{r}
+tmp_lmm <- suppressMessages(
+                suppressWarnings(
+                    lmer(RT ~ type + (1|participant) + (1|item), tmp_dt_2)))
+
+anova(tmp_lmm)$`Pr(>F)`[1] # extract p-value
+
+# helper function
+# Has the model converged ?
+check_convergence_status <- function(mm){
+  if ( !inherits(mm, "merMod")) stop("Error: must pass a lmerMod object")
+  retval <- NULL
+  
+  if(is.null(unlist(mm@optinfo$conv$lme4))) {
+    retval = "Converged"
+  }
+  else if (isSingular(mm)) {
+    retval = "Singular"
+  } 
+  else {
+    retval = "Not_converged"
+  }
+  
+  return(retval)
+}
+
+check_convergence_status(tmp_lmm)
+```
+
+Now we just have to replicate this (at least) a 1000 times after passing it though a linear mixed models to be able to extract the power: 
+```{r}
+n_sims <- 1000 #number of simulations
+alpha <- 0.01
+desired_power <- 0.9
+
+power_at_n <- c()
+p_vals <- convergence_status <- vector(length = n_sims)
+
+
+for (sim in 1:n_sims) {
+  if(sim %% 100 == 0){print(sim)}
+  
+  tmp_dt <- generate_design_matrix(n_participants = 10, n_items = 10)
+  tmp_dt_2 <- add_y_data(tmp_dt)
+  tmp_lmm <- suppressMessages(
+              suppressWarnings(
+                  lmer(RT ~ type + (1|participant) + (1|item), tmp_dt_2)))
+  p_vals[sim] <- anova(tmp_lmm)$`Pr(>F)`[1] # extract p-value
+  #if you want to check the convergence add this line
+  #convergence_status[sim] <- check_convergence_status(tmp_lmm)
+}
+# check power (i.e. proportion of p-values that are smaller than alpha-level)
+cat("The power in this case is", mean(p_vals < alpha))
+```
+
+## The full power analysis
+
+We are now going to vary the number of participant and the number of item and put the corresponding values in a table :
+
+```{r}
+n_sims <- 1000 #number of simulations
+alpha <- 0.01
+desired_power <- 0.9
+
+power_at_n <- c()
+p_vals <- convergence_status <- vector(length = n_sims)
+
+
+sets_parameters <- expand.grid(participants = seq(from = 10, to = 30, by = 10),
+                              items = seq(from = 10, to = 30, by = 10))
+
+
+for(set in 1:nrow(sets_parameters)){
+  for (sim in 1:n_sims) {
+    if(sim %% 100 == 0){print(sim)}
+    
+    tmp_dt <- generate_design_matrix(n_participants = sets_parameters$participants[set],
+                                     n_items = sets_parameters$items[set])
+    tmp_dt_2 <- add_y_data(tmp_dt)
+    tmp_lmm <- suppressMessages(
+                suppressWarnings(
+                    lmer(RT ~ type + (1|participant) + (1|item), tmp_dt_2)))
+    p_vals[sim] <- anova(tmp_lmm)$`Pr(>F)`[1] # extract p-value
+    #if you want to check the convergence add this line
+    #convergence_status[sim] <- check_convergence_status(tmp_lmm)
+  }
+  # check power (i.e. proportion of p-values that are smaller than alpha-level)
+  sets_parameters$power[set] <- mean(p_vals < alpha) 
+}
+```
+
+```{r}
+sets_parameters
+```
+## Using R packages
+### simr
+
+We can use the package *simr* to obtain the same results using either a pilot study and its analysis (see function *extend()*) ro using our simulated dataset.
+
+```{r}
+library(simr)
+```
+We take our artificial data
+
+```{r}
+artificial_data <- generate_design_matrix(n_participants = 10,
+                         n_items = 10) |> 
+  add_y_data() 
+```
+
+And our model formula
+
+```{r}
+model_formula <- RT ~ type + (1|participant) + (1|item)
+```
+
+```{r}
+artificial_lmer <-  lmer(RT ~ type + (1|participant) + (1|item),
+                         artificial_data)
+```
+
+```{r}
+artificial_lmer_part <-
+  extend(artificial_lmer, along = "participant", n = 100)
+```
+
+```{r}
+pc <- powerCurve(artificial_lmer_part, along = "participant",
+                 test = fcompare(RT ~ 1 + (1|participant) + (1|item))) |>
+  suppressMessages() |>
+  suppressWarnings()
+```
+```{r}
+plot(pc)
+```
+
+They are more optimist than me here, but you have to be careful. This package is using slice of the current data to simulate more data and our current data is really small (10 participants for 10 items and 4 tupes of items).
+

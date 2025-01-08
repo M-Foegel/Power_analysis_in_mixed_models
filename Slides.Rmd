@@ -1,0 +1,346 @@
+---
+title: "Power analysis for mixed models"
+author: "Martial Foegel"
+date: "`r Sys.Date()`"
+output: 
+  beamer_presentation:
+    slide_level: 2
+    includes:
+      in_header: mystyle.tex
+bibliography: references.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+
+# ipak function: install and load multiple R packages.
+# check to see if packages are installed. Install them if they are not, then load them into the R session.
+
+ipak <- function(pkg){
+    new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+    if (length(new.pkg)) 
+        install.packages(new.pkg, dependencies = TRUE)
+    sapply(pkg, require, character.only = TRUE)
+}
+
+# usage
+packages <- c("rmarkdown", "ggplot2", "scales", "tinytex", "lmerTest")
+ipak(packages)
+
+#for replication puposes
+set.seed(26122023)
+```
+
+# Why bother with a power analysis ?
+
+Power analysis allows you, before conducting an experiment, know how many items, participants or other experimental settings need to be taken considered in order for your future statistical analysis to come with a given power. Higher power means better replicability of the given experiement (when you correctly reject your null hypothesis), and also reduce the Type S and Type M error. Lastly, doing a power analysis forces you to think about your statistical model through and through before doing the experiement.
+
+<!-- Here I'm going to show you how to do a power analysis with a simulation in R, so that you can easily expand upon it in your on work. My aim today is that you end up with an understanding of both power analysis and how to use simulation in R to do it so that the building blocks are laid for you to build upon. -->
+
+# What is a power analysis ?
+
+## Power in relation to a statistical analysis
+
+```{=tex}
+% Please add the following required packages to your document preamble:
+% \usepackage{multirow}
+\begin{table}[]
+\begin{tabular}{|cc|clcl|}
+\hline
+\multicolumn{2}{|c|}{\multirow{2}{*}{}} & \multicolumn{4}{c|}{Statistical analysis result (sample)} \\ 
+\cline{3-6} 
+\multicolumn{2}{|c|}{}                  & \multicolumn{2}{c|}{Reject $H_0$}   & \multicolumn{2}{c|}{Don't reject $H_0$} \\ 
+\hline
+\multicolumn{1}{|c|}{\multirow{2}{*}{\begin{tabular}[c]{@{}c@{}}Reality \\
+                                                    (population)\end{tabular}}} 
+                                        & $H_0$ is true  & \multicolumn{2}{c|}{\begin{tabular}[c]{@{}c@{}}FP\\
+                                                                                              Type I error\\ $\alpha$\end{tabular}} 
+                                        & \multicolumn{2}{c|}{\begin{tabular}[c]{@{}c@{}}TN\\ 
+                                                                                 Correct decision\\ $1-\alpha$\end{tabular}} \\ 
+\cline{2-6} 
+\multicolumn{1}{|c|}{}  & $H_0$ is false & \multicolumn{2}{c|}{\begin{tabular}[c]{@{}c@{}}TP\\ Correct decision\\ $1-\beta$\end{tabular}} & \multicolumn{2}{c|}{\begin{tabular}[c]{@{}c@{}}FN\\ Type II error\\ $\beta$\end{tabular}} \\ 
+\hline
+\end{tabular}
+\end{table}
+```
+
+## Illustrating power
+
+$H_0 : \mu = 0$
+$H_a : \mu > 0$
+
+```{r, warning=FALSE}
+illustrate_power_two_dist <- function(diff_means, alpha){
+  dt <- data.frame(groups = c(rep("Dist_under_H_0", 1000), rep("Dist_under_H_1", 1000)),
+                   values = c(rnorm(1000), rnorm(1000, mean = diff_means)))
+  
+  cutoff <- quantile(dt$values[dt$groups == "Dist_under_H_0"], 0.95)
+  
+  ggplot(dt, aes(x = values, color = groups, fill = groups))+
+    #geom_histogram()+
+    geom_density(alpha = 0.5)+
+    geom_vline(xintercept = cutoff)+
+    annotate("label",
+             label = c(expression(alpha), expression(beta)),
+             parse = T,
+             x = c(cutoff + 0.3, cutoff - 0.3),
+             y = 0.03,
+             fill = hue_pal()(2))
+}
+
+illustrate_power_two_dist(diff_means = 3, alpha = 0.01)
+
+# power_here <- mean(dt$values[dt$groups == "Dist_under_H_1"] > cutoff)
+```
+
+## Steps of a power analysis
+
+> 1.  Specify a null hypothesis, alternative hypothesis, alpha level, and desired power.
+> 2.  Start with a small sample size and simulate your data with at least 1000 replications.
+> 3.  Calculate the power by taking the proportion of p-values that are under the alpha level.
+> 4.  
+>     - If the power calculated is above the desired power level, stop the simulation.
+>     - If it is below, then increase the sample size and start again from step 3. 
+
+# Power analysis for linear models
+
+Here for a simple linear model with two groups where we are comparing their average.
+$H_0 : \mu_1 = \mu_2$
+$H_a : \mu_1 \neq \mu_2$
+
+
+```{r}
+diff_means <- 1 #the estimated difference in means between the two groups
+
+n_sims <- 1000 #number of simulations
+alpha <- 0.01
+desired_power <- 0.9
+n <- 10  #sample size
+n_step_size <- 10 #by how much we increase the sample size of each group
+
+
+power_at_n <- c()
+p_vals <- vector(length = n_sims)
+
+i <- 1
+
+repeat {
+  for (sim in 1:n_sims) {
+    dt <- data.frame(groups = c(rep("group_1", n), rep("group_2", n)),
+                   values = c(rnorm(n), rnorm(n, mean = diff_means)))
+    p_vals[sim] <- anova(lm(values ~ groups, data = dt))$`Pr(>F)`[1]
+  }
+  # check power (i.e. proportion of p-values that are smaller than alpha-level)
+  power_at_n[i] <- mean(p_vals < alpha) 
+  names(power_at_n[i]) <- n
+  cat("Current power for sample size ", n, ": ", power_at_n[i], "\n")
+  
+  if(power_at_n[i] > desired_power){break}
+  
+  n <- n + n_step_size
+  i <- i + 1
+}
+```
+
+# Power analysis for mixed models
+
+Let's imagine an experiment where your presenting a particular type of word in different context, before presenting the participant with a judgement task on which you measure their response time. Then the elements we will work with here are the number of participants, the number of items (the context of presentation of the target word) and the type of word (e.g. verbs, nouns, adjectives and adverbs). For the power analysis We will vary the number of participants and items, while the number of type will be fixed to 4.
+
+## Step by step with everything fixed
+
+Let us first generate our design matrix :
+
+```{r}
+generate_design_matrix <- function(n_participants, n_items){
+  dt <- expand.grid(type = c("Verb", "Noun", "Adj", "Adv"),
+                    participant = 1:n_participants,
+                    item = 1:n_items  #number of item for each type of word
+                    )
+  return(dt)
+}
+
+(tmp_dt <- generate_design_matrix(n_participants = 30, n_items = 20))
+```
+
+Now for this analysis, we will put a random intercept on participants and items, so the model will look something like this :
+$$y_{ijk} =\mu +t_j + p_k +i_l + \epsilon_{jkl}\\
+p_k \sim N(0, \sigma_p^2),\quad i_l \sim N(0, \sigma_i^2),\quad \epsilon_{jkl} \sim N(0, \sigma_\epsilon^2), \text{ mutually independant,} $$
+with $y$ the response time for type $j$, participant $k$ and item $l$, $t$ the fixed effect for each type $j$ corresponding to the four values for the type of word ("Verb", "Noun", "Adj", "Adv"), $p_k$ the random intercept for the $k$-th participant, $i_l$ the random intercept for the $l$-th item and $ \epsilon_{jkl}$ the random residual error term.
+
+Now let's set all the values for fixed and random effect up:
+
+```{r}
+mu <- 800 #average RT
+t_j <- c("Verb" = -20, "Noun" = 30,
+         "Adj" = 10, "Adv" = -10) #effect of types of word
+sd_p <- 100 #random intercept sd for subject
+sd_i <- 80 #random intercept sd for item
+sd_epsilon <- 200 #random residual error sd
+```
+
+Now we just need to create the random samples for item and participant.
+
+```{r}
+p_k <- rnorm(unique(tmp_dt$participant), sd = sd_p)
+i_l <- rnorm(unique(tmp_dt$item), sd = sd_i)
+```
+
+Now to generate the response type we can go through our design matrix and calculate the value for each line with the following :
+
+```{r}
+y <- nrow(tmp_dt)
+
+for(i in 1:nrow(tmp_dt)){
+  y[i] <- mu + 
+    t_j[tmp_dt$type[i]] + 
+    p_k[tmp_dt$participant[i]] + 
+    i_l[tmp_dt$item[i]] +
+    rnorm(1, sd = sd_epsilon)
+}
+
+head(tmp_dt <- cbind(tmp_dt, RT = y))
+```
+
+Put all of this in a function
+
+```{r}
+add_y_data <- function(dataframe){
+  mu <- 800 #average RT
+  t_j <- c("Verb" = -20, "Noun" = 30,
+         "Adj" = 10, "Adv" = -10) #effect of types of word
+  sd_p <- 100 #random intercept sd for subject
+  sd_i <- 80 #random intercept sd for item
+  sd_epsilon <- 200 #random residual error sd
+  
+  p_k <- rnorm(unique(dataframe$participant), sd = sd_p)
+  i_l <- rnorm(unique(dataframe$item), sd = sd_i)
+  
+  y <- nrow(dataframe)
+
+  for(i in 1:nrow(dataframe)){
+    y[i] <- mu + 
+      t_j[dataframe$type[i]] + 
+      p_k[dataframe$participant[i]] + 
+      i_l[dataframe$item[i]] +
+      rnorm(1, sd = sd_epsilon)
+  }
+
+  dataframe <- cbind(dataframe, RT = y)
+  return(dataframe)
+}
+
+(tmp_dt_2 <- add_y_data(tmp_dt))
+```
+
+
+Now we can fit our model onto our simulated data :
+
+```{r}
+anova(lmer(RT ~ type + (1|participant) + (1|item), tmp_dt_2), corr = F)
+```
+Be mindful, getting the degrees of freedoms (and by extension p-values) in a mixed model is not a trivial matter. Here we are using package *lmerTest* which use the Welch–Satterthwaite approximation to get the degrees of freedom.
+
+Let us now store the p-value, as well as the information on the singularity/convergence of the model.
+
+```{r}
+tmp_lmm <- suppressMessages(
+                suppressWarnings(
+                    lmer(RT ~ type + (1|participant) + (1|item), tmp_dt_2)))
+
+anova(tmp_lmm)$`Pr(>F)`[1] # extract p-value
+
+# helper function
+# Has the model converged ?
+check_convergence_status <- function(mm){
+  if ( !inherits(mm, "merMod")) stop("Error: must pass a lmerMod object")
+  retval <- NULL
+  
+  if(is.null(unlist(mm@optinfo$conv$lme4))) {
+    retval = "Converged"
+  }
+  else if (isSingular(mm)) {
+    retval = "Singular"
+  } 
+  else {
+    retval = "Not_converged"
+  }
+  
+  return(retval)
+}
+
+check_convergence_status(tmp_lmm)
+```
+
+Now we just have to replicate this (at least) a 1000 times after passing it though a linear mixed models to be able to extract the power: 
+```{r}
+n_sims <- 1000 #number of simulations
+alpha <- 0.05
+desired_power <- 0.9
+
+power_at_n <- c()
+p_vals <- convergence_status <- vector(length = n_sims)
+
+
+for (sim in 1:n_sims) {
+  if(sim %% 100 == 0){print(sim)}
+  
+  tmp_dt <- generate_design_matrix(n_participants = 10, n_items = 10)
+  tmp_dt_2 <- add_y_data(tmp_dt)
+  tmp_lmm <- suppressMessages(
+              suppressWarnings(
+                  lmer(RT ~ type + (1|participant) + (1|item), tmp_dt_2)))
+  p_vals[sim] <- anova(tmp_lmm)$`Pr(>F)`[1] # extract p-value
+  #if you want to check the convergence add this line
+  #convergence_status[sim] <- check_convergence_status(tmp_lmm)
+}
+# check power (i.e. proportion of p-values that are smaller than alpha-level)
+cat("The power in this case is", mean(p_vals < alpha))
+```
+
+## The full power analysis
+
+We are now going to vary the number of participant and the number of item and put the corresponding power values in a table :
+
+```{r}
+n_sims <- 1000 #number of simulations
+alpha <- 0.01
+desired_power <- 0.9
+
+power_at_n <- c()
+p_vals <- convergence_status <- vector(length = n_sims)
+
+
+sets_parameters <- expand.grid(participants = seq(from = 10, to = 30, by = 10),
+                              items = seq(from = 10, to = 30, by = 10))
+
+
+for(set in 1:nrow(sets_parameters)){
+  for (sim in 1:n_sims) {
+    if(sim %% 100 == 0){print(sim)}
+    
+    tmp_dt <- generate_design_matrix(n_participants = sets_parameters$participants[set],
+                                     n_items = sets_parameters$items[set])
+    tmp_dt_2 <- add_y_data(tmp_dt)
+    tmp_lmm <- suppressMessages(
+                suppressWarnings(
+                    lmer(RT ~ type + (1|participant) + (1|item), tmp_dt_2)))
+    p_vals[sim] <- anova(tmp_lmm)$`Pr(>F)`[1] # extract p-value
+    #if you want to check the convergence add this line
+    #convergence_status[sim] <- check_convergence_status(tmp_lmm)
+  }
+  # check power (i.e. proportion of p-values that are smaller than alpha-level)
+  sets_parameters$power[set] <- mean(p_vals < alpha) 
+}
+```
+```{r}
+sets_parameters
+```
+
+
+# Concluding remarks
+
+# References {.allowframebreaks}
+
+---
+nocite: '@*'
+---
